@@ -1,0 +1,13 @@
+{
+  "11": "LeftShoulder",
+  "13": "LeftElbow",
+  "15": "LeftWrist",
+  "12": "RightShoulder",
+  "14": "RightElbow",
+  "16": "RightWrist",
+  "23": "LeftHip",
+  "24": "RightHip",
+  "25": "LeftKnee",
+  "26": "RightKnee",
+  "0": "Head"
+}

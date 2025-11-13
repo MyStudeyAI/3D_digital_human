@@ -1,0 +1,27 @@
+{
+  "name": "3d-digital-human",
+  "version": "1.0.0",
+  "private": true,
+  "description": "3D人体姿态实时展示 (React + TypeScript + Vite)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": ["threejs", "react", "vite", "typescript", "pose"],
+  "author": "generated",
+  "license": "MIT",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "three": "^0.152.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "typescript": "^5.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "@types/three": "^0.152.0"
+  }
+}
