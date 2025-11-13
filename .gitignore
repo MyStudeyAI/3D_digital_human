@@ -15,7 +15,7 @@ pids
 node_modules/
 
 # Build output
-dist/
+# dist/
 build/
 
 # Vite cache
