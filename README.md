@@ -32,6 +32,7 @@ const HINGE_JOINTS: Record<number, HingeJointConfig> = {
   26: { parent: 24, child: 28, dependents: [30, 32], min: 0, max: 160, label: '右膝' }
 }
 ```
+![演示规则例子](./readme/02.png)
 
 
 
