@@ -1,6 +1,7 @@
 {
   "name": "3d-digital-human",
   "version": "1.0.0",
+  "type": "module",
   "private": true,
   "description": "3D人体姿态实时展示 (React + TypeScript + Vite)",
   "scripts": {

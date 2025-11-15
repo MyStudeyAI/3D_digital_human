@@ -59,14 +59,46 @@ type HingeJointConfig = {
   min?: number
   max?: number
   label: string
+  type: 'hinge' // 单轴铰链关节（肘、膝）
 }
 
-const HINGE_JOINTS: Record<number, HingeJointConfig> = {
-  13: { parent: 11, child: 15, dependents: [17, 19, 21], min: 0, max: 150, label: '左肘' },
-  14: { parent: 12, child: 16, dependents: [18, 20, 22], min: 0, max: 150, label: '右肘' },
-  25: { parent: 23, child: 27, dependents: [29, 31], min: 0, max: 160, label: '左膝' },
-  26: { parent: 24, child: 28, dependents: [30, 32], min: 0, max: 160, label: '右膝' }
+type BallJointConfig = {
+  parent: number
+  child: number
+  dependents?: number[]
+  label: string
+  type: 'ball' // 多轴球关节（肩、髋）
+  // 俯仰角度（上下抬臂/抬腿），单位度
+  elevationMin?: number
+  elevationMax?: number
+  // 内外旋角度（手臂旋转/腿部旋转），单位度
+  rotationMin?: number
+  rotationMax?: number
 }
+
+type JointConfig = HingeJointConfig | BallJointConfig
+
+const JOINT_CONFIGS: Record<number, JointConfig> = {
+  // 单轴铰链关节
+  13: { parent: 11, child: 15, dependents: [17, 19, 21], min: 0, max: 150, label: '左肘', type: 'hinge' },
+  14: { parent: 12, child: 16, dependents: [18, 20, 22], min: 0, max: 150, label: '右肘', type: 'hinge' },
+  25: { parent: 23, child: 27, dependents: [29, 31], min: 0, max: 160, label: '左膝', type: 'hinge' },
+  26: { parent: 24, child: 28, dependents: [30, 32], min: 0, max: 160, label: '右膝', type: 'hinge' },
+  // 多轴球关节（肩）
+  11: { parent: 0, child: 13, dependents: [15, 17, 19, 21], label: '左肩', type: 'ball', elevationMin: -180, elevationMax: 180, rotationMin: -90, rotationMax: 90 },
+  12: { parent: 0, child: 14, dependents: [16, 18, 20, 22], label: '右肩', type: 'ball', elevationMin: -180, elevationMax: 180, rotationMin: -90, rotationMax: 90 },
+  // 多轴球关节（髋）
+  23: { parent: 24, child: 25, dependents: [27, 29, 31], label: '左髋', type: 'ball', elevationMin: -90, elevationMax: 90, rotationMin: -45, rotationMax: 45 },
+  24: { parent: 23, child: 26, dependents: [28, 30, 32], label: '右髋', type: 'ball', elevationMin: -90, elevationMax: 90, rotationMin: -45, rotationMax: 45 }
+}
+
+// 保持向后兼容
+const HINGE_JOINTS: Record<number, HingeJointConfig> = {}
+Object.entries(JOINT_CONFIGS).forEach(([key, config]) => {
+  if (config.type === 'hinge') {
+    HINGE_JOINTS[Number(key)] = config
+  }
+})
 
 const clonePose = (pose: PoseFrame): PoseFrame =>
   Object.fromEntries(
@@ -236,6 +268,138 @@ function applyHingeFlex(
   })
 }
 
+function computeBallJointAngles(pose: PoseFrame, jointIdx: number): { elevation: number; rotation: number } | null {
+  const cfg = JOINT_CONFIGS[jointIdx]
+  if (!cfg || cfg.type !== 'ball') return null
+  const joint = pose[jointIdx]
+  const parent = pose[cfg.parent]
+  const child = pose[cfg.child]
+  if (!joint || !parent || !child) return null
+
+  const jointScene = toSceneVector(joint)
+  const parentScene = toSceneVector(parent)
+  const childScene = toSceneVector(child)
+
+  // 从父节点到关节的向量
+  const parentToJoint = jointScene.clone().sub(parentScene)
+  const parentToJointLen = parentToJoint.length()
+  if (parentToJointLen < 1e-4) return null
+  const parentToJointNorm = parentToJoint.normalize()
+
+  // 从关节到子节点的向量
+  const jointToChild = childScene.clone().sub(jointScene)
+  const jointToChildLen = jointToChild.length()
+  if (jointToChildLen < 1e-4) return null
+  const jointToChildNorm = jointToChild.normalize()
+
+  // 构建局部坐标系
+  const up = new THREE.Vector3(0, 1, 0)
+  let forward = new THREE.Vector3(0, 0, -1)
+  let right = new THREE.Vector3(1, 0, 0)
+
+  // 如果是髋关节，使用髋部中点作为参考
+  if (jointIdx === 23 || jointIdx === 24) {
+    const otherHipIdx = jointIdx === 23 ? 24 : 23
+    const otherHip = pose[otherHipIdx]
+    if (otherHip) {
+      const otherHipScene = toSceneVector(otherHip)
+      const hipCenter = parentScene.clone().add(jointScene).multiplyScalar(0.5)
+      forward = otherHipScene.clone().sub(hipCenter).normalize()
+      if (forward.lengthSq() < 1e-4) forward = new THREE.Vector3(0, 0, -1)
+      right = up.clone().cross(forward).normalize()
+      if (right.lengthSq() < 1e-4) right = new THREE.Vector3(1, 0, 0)
+    }
+  }
+
+  // 计算俯仰角度（相对于水平面的上下角度）
+  const elevationRad = Math.asin(clampNumber(jointToChildNorm.dot(up), -1, 1))
+  const elevationDeg = THREE.MathUtils.radToDeg(elevationRad)
+
+  // 计算旋转角度（在水平面上的左右角度）
+  const projToForward = jointToChildNorm.clone().sub(up.clone().multiplyScalar(jointToChildNorm.dot(up))).normalize()
+  if (projToForward.lengthSq() < 1e-4) {
+    return { elevation: clampNumber(elevationDeg, cfg.elevationMin ?? -90, cfg.elevationMax ?? 90), rotation: 0 }
+  }
+  const rotationRad = Math.atan2(projToForward.dot(right), projToForward.dot(forward))
+  const rotationDeg = THREE.MathUtils.radToDeg(rotationRad)
+
+  return {
+    elevation: clampNumber(elevationDeg, cfg.elevationMin ?? -90, cfg.elevationMax ?? 90),
+    rotation: clampNumber(rotationDeg, cfg.rotationMin ?? -90, cfg.rotationMax ?? 90)
+  }
+}
+
+function applyBallJointAngles(
+  pose: PoseFrame,
+  basePose: PoseFrame,
+  jointIdx: number,
+  elevationDeg: number,
+  rotationDeg: number
+) {
+  const cfg = JOINT_CONFIGS[jointIdx]
+  if (!cfg || cfg.type !== 'ball') return
+  const joint = pose[jointIdx] ?? basePose[jointIdx]
+  const parent = pose[cfg.parent] ?? basePose[cfg.parent]
+  const child = pose[cfg.child] ?? basePose[cfg.child]
+  if (!joint || !parent || !child) return
+
+  const jointScene = toSceneVector(joint)
+  const parentScene = toSceneVector(parent)
+  const childScene = toSceneVector(child)
+
+  const parentToJoint = jointScene.clone().sub(parentScene)
+  const parentToJointLen = parentToJoint.length()
+  const jointToChild = childScene.clone().sub(jointScene)
+  const jointToChildLen = jointToChild.length()
+
+  if (parentToJointLen < 1e-4 || jointToChildLen < 1e-4) return
+
+  // 计算俯仰和旋转
+  const elevationRad = THREE.MathUtils.degToRad(clampNumber(elevationDeg, cfg.elevationMin ?? -90, cfg.elevationMax ?? 90))
+  const rotationRad = THREE.MathUtils.degToRad(clampNumber(rotationDeg, cfg.rotationMin ?? -90, cfg.rotationMax ?? 90))
+
+  // 构建局部坐标系
+  const up = new THREE.Vector3(0, 1, 0)
+  let forward = new THREE.Vector3(0, 0, -1)
+  let right = new THREE.Vector3(1, 0, 0)
+
+  // 如果是髋关节，使用髋部中点作为参考
+  if (jointIdx === 23 || jointIdx === 24) {
+    const otherHipIdx = jointIdx === 23 ? 24 : 23
+    const otherHip = pose[otherHipIdx] ?? basePose[otherHipIdx]
+    if (otherHip) {
+      const otherHipScene = toSceneVector(otherHip)
+      const hipCenter = parentScene.clone().add(jointScene).multiplyScalar(0.5)
+      forward = otherHipScene.clone().sub(hipCenter).normalize()
+      if (forward.lengthSq() < 1e-4) forward = new THREE.Vector3(0, 0, -1)
+      right = up.clone().cross(forward).normalize()
+      if (right.lengthSq() < 1e-4) right = new THREE.Vector3(1, 0, 0)
+    }
+  }
+
+  // 应用俯仰（绕右轴旋转）
+  const elevationAxis = right.clone()
+  const elevationQuat = new THREE.Quaternion().setFromAxisAngle(elevationAxis, elevationRad)
+  let childDir = forward.clone().applyQuaternion(elevationQuat)
+
+  // 应用旋转（绕上轴旋转）
+  const rotationAxis = up.clone()
+  const rotationQuat = new THREE.Quaternion().setFromAxisAngle(rotationAxis, rotationRad)
+  childDir = childDir.applyQuaternion(rotationQuat)
+
+  // 计算新的子节点位置
+  const newChildScene = jointScene.clone().add(childDir.multiplyScalar(jointToChildLen))
+  const deltaScene = newChildScene.clone().sub(childScene)
+
+  pose[cfg.child] = toPoseVector(newChildScene)
+  cfg.dependents?.forEach((idx) => {
+    const dep = pose[idx] ?? basePose[idx]
+    if (!dep) return
+    const depScene = toSceneVector(dep).add(deltaScene)
+    pose[idx] = toPoseVector(depScene)
+  })
+}
+
 export default function HumanViewer({ initialPose }: Props) {
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const requestRef = useRef<number | null>(null)
@@ -270,7 +434,7 @@ export default function HumanViewer({ initialPose }: Props) {
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x111217)
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000)
-    camera.position.set(2.5, 2.2, 5.2)
+    camera.position.set(3.0, 2.5, 7.5)
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.8)
     const hemi = new THREE.HemisphereLight(0xb1e1ff, 0x1f2933, 0.4)
@@ -504,7 +668,7 @@ export default function HumanViewer({ initialPose }: Props) {
   const resetView = () => {
     if (!threeRef.current) return
     const { camera, controls } = threeRef.current
-    camera.position.set(2.5, 2.2, 5.2)
+    camera.position.set(3.0, 2.5, 7.5)
     controls.target.set(0, 1.0, 0)
     controls.update()
   }
@@ -547,12 +711,21 @@ export default function HumanViewer({ initialPose }: Props) {
     })
   }, [availableBones])
 
+  const jointConfig = JOINT_CONFIGS[selectedJoint]
   const hingeConfig = HINGE_JOINTS[selectedJoint]
+  const ballConfig = jointConfig?.type === 'ball' ? jointConfig : null
+
   const hingeFlexAngle = useMemo(() => {
     if (!hingeConfig) return null
     const angle = computeFlexAngleDegrees(pose, selectedJoint)
     return angle ?? 0
   }, [pose, selectedJoint, hingeConfig])
+
+  const ballJointAngles = useMemo(() => {
+    if (!ballConfig) return null
+    const angles = computeBallJointAngles(pose, selectedJoint)
+    return angles ?? { elevation: 0, rotation: 0 }
+  }, [pose, selectedJoint, ballConfig])
 
   const handleHingeFlexChange = (value: number) => {
     if (!hingeConfig) return
@@ -564,6 +737,37 @@ export default function HumanViewer({ initialPose }: Props) {
       poseRef.current = next
       return next
     })
+  }
+
+  const handleBallJointElevationChange = (value: number) => {
+    if (!ballConfig || !ballJointAngles) return
+    if (!Number.isFinite(value)) return
+    const limited = clampNumber(value, ballConfig.elevationMin ?? -90, ballConfig.elevationMax ?? 90)
+    setPose((prev) => {
+      const next = clonePose(prev)
+      applyBallJointAngles(next, basePose, selectedJoint, limited, ballJointAngles.rotation)
+      poseRef.current = next
+      return next
+    })
+  }
+
+  const handleBallJointRotationChange = (value: number) => {
+    if (!ballConfig || !ballJointAngles) return
+    if (!Number.isFinite(value)) return
+    const limited = clampNumber(value, ballConfig.rotationMin ?? -90, ballConfig.rotationMax ?? 90)
+    setPose((prev) => {
+      const next = clonePose(prev)
+      applyBallJointAngles(next, basePose, selectedJoint, ballJointAngles.elevation, limited)
+      poseRef.current = next
+      return next
+    })
+  }
+
+  const resetJointAngle = () => {
+    if (!jointConfig) return
+    const next = clonePose(basePose)
+    poseRef.current = next
+    setPose(next)
   }
 
   return (
@@ -641,6 +845,56 @@ export default function HumanViewer({ initialPose }: Props) {
                   0° 表示完全伸直，数值越大表示弯曲越明显（建议范围 {hingeConfig.min ?? 0}° —
                   {hingeConfig.max ?? 160}°）。
                 </p>
+                <button className="reset-angle-btn" onClick={resetJointAngle}>
+                  重置角度
+                </button>
+              </>
+            ) : ballConfig ? (
+              <>
+                <label className="field inline radius-field">
+                  <span>{ballConfig.label}俯仰 (°)</span>
+                  <input
+                    type="range"
+                    min={ballConfig.elevationMin ?? -90}
+                    max={ballConfig.elevationMax ?? 90}
+                    step={1}
+                    value={ballJointAngles?.elevation ?? 0}
+                    onChange={(e) => handleBallJointElevationChange(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={ballConfig.elevationMin ?? -90}
+                    max={ballConfig.elevationMax ?? 90}
+                    step={1}
+                    value={Number((ballJointAngles?.elevation ?? 0).toFixed(0))}
+                    onChange={(e) => handleBallJointElevationChange(Number(e.target.value))}
+                  />
+                </label>
+                <label className="field inline radius-field">
+                  <span>{ballConfig.label}旋转 (°)</span>
+                  <input
+                    type="range"
+                    min={ballConfig.rotationMin ?? -90}
+                    max={ballConfig.rotationMax ?? 90}
+                    step={1}
+                    value={ballJointAngles?.rotation ?? 0}
+                    onChange={(e) => handleBallJointRotationChange(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={ballConfig.rotationMin ?? -90}
+                    max={ballConfig.rotationMax ?? 90}
+                    step={1}
+                    value={Number((ballJointAngles?.rotation ?? 0).toFixed(0))}
+                    onChange={(e) => handleBallJointRotationChange(Number(e.target.value))}
+                  />
+                </label>
+                <p className="note small">
+                  俯仰：控制上下抬举（-90° 到 +90°）。旋转：控制内外旋转（-90° 到 +90°）。
+                </p>
+                <button className="reset-angle-btn" onClick={resetJointAngle}>
+                  重置角度
+                </button>
               </>
             ) : (
               <p className="note small">
